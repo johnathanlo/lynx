@@ -1,0 +1,337 @@
+---
+title: "Final Project STAT426"
+author: "Johnathan Lo"
+date: "4/24/2021"
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("~/SPRING21/STAT426/HW3/")
+library(astsa)
+library(tsdl)
+library(knitr)
+library(MTS)
+set.seed(504)
+
+```
+
+
+# 1. Extract Data
+
+```{r}
+tsdl_ecology <- subset(tsdl, "Ecology")
+attributes(tsdl_ecology[[13]])
+
+par(mfrow = c(2,1))
+lynx <- tsdl_ecology[[13]]
+ts.plot(lynx, gpars = list(main = "Raw lynx series"))#data exhibits sharp peaks and smooth troughs; cyclical pattern seems to be asymmetric
+#log transform then demean to produce more symmetric cycles
+lynx_tf <- log(lynx)
+lynx_tf <- lynx_tf - mean(lynx_tf)
+ts.plot(lynx_tf, gpars = list(main = "Transformed lynx series"))
+```
+
+
+```{r}
+#we can look at related time series for snowshoe hare population
+data("Hare")
+hare <- Hare
+par(mfrow=c(2,1))
+ts.plot(hare, gpars = list(main = "Raw hare series"))#hare exhibits similarly asymmetric cycles
+
+#transform hare
+hare_tf <- log(hare)
+hare_tf <- hare_tf - mean(hare_tf)
+ts.plot(hare_tf, gpars = list(main="Transformed hare series"))
+
+#plot raw hare and lynx together
+lynx_subset <- window(lynx, start = start(hare))
+hare_subset <- window(hare, end = end(lynx))
+
+#normalize data
+lynx_mean <- mean(lynx_subset)
+lynx_var <- var(lynx_subset)
+lynx_subset_scaled <- (lynx_subset - lynx_mean)/(sqrt(lynx_var))
+
+hare_mean <- mean(hare_subset)
+hare_var <- var(hare_subset)
+hare_subset_scaled <- (hare_subset-hare_mean)/(sqrt(hare_var))
+
+
+ts.plot(lynx_subset_scaled, hare_subset_scaled, gpars = list(xlab = "Year", ylab = "Normalized population", main = "Scaled raw hare and lynx series", lty = c(1:2), col = c(1:2), lwd = 2))
+legend(1910, 3, legend = c("Lynx", "Hare"), col = c(1:2), lty = c(1:2), lwd = 2)
+
+#plot transformed hare and lynx
+lynx_tf_subset <- window(lynx_tf, start = start(hare))
+hare_tf_subset <- window(hare_tf, end = end(lynx))
+
+#normalize data
+lynx_tf_mean <- mean(lynx_tf_subset)
+lynx_tf_var <- var(lynx_tf_subset)
+lynx_tf_subset_scaled <- (lynx_tf_subset - lynx_tf_mean)/(sqrt(lynx_tf_var))
+
+hare_tf_mean <- mean(hare_tf_subset)
+hare_tf_var <- var(hare_tf_subset)
+hare_tf_subset_scaled <- (hare_tf_subset-hare_tf_mean)/(sqrt(hare_tf_var))
+
+ts.plot(lynx_tf_subset_scaled, hare_tf_subset_scaled, gpars = list(xlab = "Year", ylab = "Normalized population", main = "Scaled transformed hare and lynx series", lty = c(1:2), col = c(1:2), lwd = 2))
+legend(1910, 1, legend = c("Lynx", "Hare"), col = c(1:2), lty = c(1:2), lwd = 2)
+
+#acf and ccf plots for transformed data
+par(mfrow = c(3,1))
+acf(lynx_tf_subset_scaled, main = "Lynx population (transformed)")
+acf(hare_tf_subset_scaled, main = "Hare population (transformed)")
+ccf(lynx_tf_subset_scaled, hare_tf_subset_scaled, main = "Lynx vs Hare")
+```
+Clear seasonality, cycles roughly 10 years. Take difference of 10 to detrend.
+```{r}
+#take difference first to produce stationarity
+lynx_diff <- diff(lynx_tf, 10)
+ts.plot(lynx_diff, main = "Differenced and transformed lynx series", ylab = "Transformed returns", xlab = "Year")
+acf2(lynx_diff, main = "ACF and PACF for differenced and transformed lynx series") #acf appears stationary, reflects an AR model
+```
+
+
+```{r}
+#now make training testing split
+lynx_train <- window(lynx_diff, start = 1831, end = 1920)
+lynx_test <- window(lynx_diff, start = 1921, end = 1925)
+```
+
+
+# 2. Building ARIMA models
+
+```{r}
+#choose model using visual heuristic
+lynx_model1 <- sarima(lynx_train, 1, 0, 0, no.constant = T) #this model seems to be acceptable
+
+```
+
+
+```{r}
+#choose model with BIC
+n<-length(lynx_train)
+p=3
+q=3
+P=2
+Q=2
+crit_BIC<-array(0, dim = c(p+1, q+1, P+1, Q+1))
+for (j in 0:p){
+  for (k in 0:q){
+    for (l in 0:P){
+      for(m in 0:Q){
+          try(model<-sarima(lynx_train, j, d= 0, k, P = l, D = 0, Q = m, S = 10, 
+                            details = FALSE, no.constant = T))
+          crit_BIC[j+1,k+1,l+1,m+1]<-model$BIC
+          
+      }
+    }
+  }
+}
+```
+```{r}
+#determine model
+bic_model <- which(crit_BIC == min(crit_BIC), arr.ind= TRUE)
+ar_order <- bic_model[,"dim1"] - 1
+ma_order <- bic_model[,"dim2"] - 1
+SAR_order <- bic_model[,"dim3"] - 1
+SMA_order <- bic_model[,"dim4"] - 1
+
+lynx_model2 <- sarima(lynx_train, ar_order, 0, ma_order, P=SAR_order, D= 0, Q = SMA_order, S=10, no.constant = T)
+```
+
+Residuals look good.
+```{r}
+#compare both SARIMA models
+sigma2 <- c(lynx_model1$fit$sigma2, lynx_model2$fit$sigma2)
+BIC <- c(lynx_model1$BIC, lynx_model2$BIC)
+AIC <- c(lynx_model1$AIC, lynx_model2$AIC)
+compare_models <- data.frame(sigma2, BIC, AIC)
+colnames(compare_models) <- c("Error variance", "BIC", "AIC")
+row.names(compare_models) <- c("AR(1)", "ARMA(2,0)x(0,1)")
+
+kable(compare_models, format = "markdown", digits = 3)
+
+```
+
+```{r}
+#spectral analysis - smoothing
+#bandwidth = .0333
+lynx_spec <- mvspec(lynx_diff, spans = 2,col = rgb(.05, .6, .75), log = "yes" ,lwd = 2)
+#identify peaks
+max_specs <- sort(lynx_spec$spec, decreasing = T)[1:3]
+max_freq_1 <- lynx_spec$freq[lynx_spec$spec == max_specs[1]]
+max_freq_2 <- lynx_spec$freq[lynx_spec$spec == max_specs[2]]
+max_freq_3 <- lynx_spec$freq[lynx_spec$spec == max_specs[3]]
+#draw peaks
+abline(v=max_freq_1, lty = 2, col = "dodgerblue")
+abline(v=max_freq_2, lty = 2, col = "dodgerblue")
+abline(v=max_freq_3, lty = 2, col = "dodgerblue")
+mtext(max_freq_1, side = 1, line = 0, at = max_freq_1, cex = .5)
+
+#bandwidth  = .0571
+lynx_spec <- mvspec(lynx_diff, spans = 5,col = rgb(.05, .6, .75), log = "yes", lwd = 2)
+#identify peaks
+max_specs <- sort(lynx_spec$spec, decreasing = T)[1:3]
+max_freq_1 <- lynx_spec$freq[lynx_spec$spec == max_specs[1]]
+max_freq_2 <- lynx_spec$freq[lynx_spec$spec == max_specs[2]]
+max_freq_3 <- lynx_spec$freq[lynx_spec$spec == max_specs[3]]
+#draw peaks
+abline(v=max_freq_1, lty = 2, col = "dodgerblue")
+abline(v=max_freq_2, lty = 2, col = "dodgerblue")
+abline(v=max_freq_3, lty = 2, col = "dodgerblue")
+mtext(max_freq_1, side = 1, line = 0, at = max_freq_1, cex = .5)
+
+#bandwidth  = .0571
+lynx_spec <- mvspec(lynx_diff, spans = 10,col = rgb(.05, .6, .75), log = "yes", lwd = 2)
+#identify peaks
+max_specs <- sort(lynx_spec$spec, decreasing = T)[1:3]
+max_freq_1 <- lynx_spec$freq[lynx_spec$spec == max_specs[1]]
+max_freq_2 <- lynx_spec$freq[lynx_spec$spec == max_specs[2]]
+max_freq_3 <- lynx_spec$freq[lynx_spec$spec == max_specs[3]]
+#draw peaks
+abline(v=max_freq_1, lty = 2, col = "dodgerblue")
+abline(v=max_freq_2, lty = 2, col = "dodgerblue")
+abline(v=max_freq_3, lty = 2, col = "dodgerblue")
+mtext(max_freq_1, side = 1, line = 0, at = max_freq_1, cex = .5)
+
+
+```
+
+```{r}
+#spectral analysis - AR regression
+
+lynx_ar_spec = spec.ar(lynx_diff, log="yes", col="cyan4")
+lynx_ar_spec_aic = ar(lynx_diff, order.max=30) 
+plot(1:30, lynx_ar_spec_aic$aic[-1], type="o") 
+
+P = Mod(fft(lynx_diff)/sqrt(length(lynx_diff)))^2
+sP = (4/length(lynx_diff))*P
+Fr = 0:(length(lynx_diff)-1)/length(lynx_diff)
+tsplot(Fr, sP, type = "o", xlab = "frequency", ylab = "scaled periodogram", col = 4, ylim = c(0,2))
+abline(v=.5, lty=5)
+abline(v=c(.1,.3,.7,.9), lty = 1, col = gray(.9))
+axis(side = 1, at = seq(.1,.9, by=.2))
+
+```
+Make predictions:
+
+```{r}
+#predict with model 1
+lynx_pred1 <- sarima.for(lynx_train, n.ahead=5, 1,0,0, no.constant = TRUE)
+lynx_pred1_ts <- ts(lynx_pred1$pred, start=c(1921), end =1925)
+
+ts.plot(lynx_train, lynx_pred1_ts, col = 1:2, xlim=c(1880,1925), ylim = c(-3,3),
+        main = "Model 1: 5-step ahead prediction")
+U = lynx_pred1$pred+ 1.28*lynx_pred1$se#80% confidence interval
+L = lynx_pred1$pred - 1.28*lynx_pred1$se
+lines(U, lty="dotdash", col=4, lwd = .5)
+lines(L, lty="dashed", col=4, lwd = .5)
+lines(lynx_test, lty = "dashed", lwd = 3, col = 6)
+legend("topleft", legend = c("predicted", "actual", "80% CI"), col = c(2,6,4), lty = c("solid", "dashed", "dotdash"), lwd = c(1, 3,.5))
+
+#predict with model 2
+lynx_pred2 <- sarima.for(lynx_train, n.ahead=5, ar_order,0, ma_order,
+                        P = SAR_order, D = 0, Q = SMA_order,S = 10, no.constant = TRUE)
+lynx_pred2_ts <- ts(lynx_pred2$pred, start=c(1921), end =1925)
+
+ts.plot(lynx_train, lynx_pred2_ts, col = 1:2, xlim=c(1880,1925), ylim = c(-3,3), 
+        main = "Model 2: 5-step ahead prediction")
+U = lynx_pred2$pred+ 1.28*lynx_pred2$se#80% confidence interval
+L = lynx_pred2$pred - 1.28*lynx_pred2$se
+lines(U, lty="dotdash", col=4, lwd = .5)
+lines(L, lty="dashed", col=4, lwd = .5)
+lines(lynx_test, lty = "dashed", lwd = 3, col = 6)
+legend("topleft", legend = c("predicted", "actual", "80% CI"), col = c(2,6,4), lty = c("solid", "dashed", "dotdash"), lwd = c(1, 3,.5))
+```
+
+error:
+```{r}
+
+lynx_pred1_error <- sum((lynx_pred1_ts - lynx_test)^2)
+lynx_pred2_error <- sum((lynx_pred2_ts - lynx_test)^2)
+lynx_pred1_error
+```
+
+```{r}
+#simulate time series for model 1
+set.seed(426)
+sim1 <- matrix(0, nrow = 110, ncol = 10)
+for(i in 1:10){
+  temp <- sarima.sim(n = 100, ar = lynx_model1$fit$coef, burnin = 100)
+  temp <- exp(temp)
+  sim1[,i] <- diffinv(temp, 10)
+}
+par(mfrow = c(2,1))
+ts.plot(sim1[,1], col = 1, ylab = "Lynx", xlab = "Year", 
+        main = "Single back-transformed realization from AR(1) model")
+ts.plot(sim1[,1:5], col = 1:10, ylab = "Lynx", xlab = "Year", 
+        main = "10 back-transformed realizations from AR(1) model")
+
+#simulate time series for model 2
+sim2 <- matrix(0, nrow = 110, ncol = 10)
+for(i in 1:10){
+  temp <- sarima.sim(n = 100, ar = lynx_model2$fit$coef[1:2], ma = 0, sar= 0, 
+           sma = lynx_model2$fit$coef[3], S = 10, burnin = 100)
+  temp <- exp(temp)
+  sim2[,i] <- diffinv(temp, 10)
+}
+par(mfrow = c(2,1))
+ts.plot(sim2[,1], col = 1, ylab = "Lynx", xlab = "Year", 
+        main = "Single back-transformed realization from AR(2)x(0,1)[10] model")
+ts.plot(sim2[,1:5], col = 1:10, ylab = "Lynx", xlab = "Year", 
+        main = "10 back-transformed realizations from AR(2)x(0,1)[10] model")
+```
+
+```{r}
+#model hare and lynx data using VARMA model
+hl <- ts.union(lynx_tf_subset, hare_tf_subset)
+hl_diff <- diff(hl, 10)
+ts.plot(hl_diff, col = 1:2, lty = 1:2, lwd = 2, xlab = "Year", ylab = "Normalized population", main = "Hares vs Lynxes, differenced data")
+legend(1860, 3, legend = c("Lynx", "Hare"), col = c(1:2), lty = c(1:2), lwd = 2)
+
+hl_train <- window(hl, start = start(hl), end= 1910)
+hl_test <- window(hl, start = 1911, end= 1925)
+
+#choose model with BIC
+n<-length(hl_train)
+p=3
+q=3
+
+crit_BIC_hl<-matrix(0, nrow = p+1, ncol = q+1)
+for (j in 0:p){
+  for (k in 0:q){
+      try(model<-VARMA(hl_train, p = j, q = k, 
+                       include.mean = F, details = FALSE))
+      crit_BIC_hl[j+1,k+1]<-model$bic
+  }
+}
+
+#determine model
+bic_model_hl <- which(crit_BIC_hl == min(crit_BIC_hl), arr.ind= TRUE)
+ar_hl <- bic_model_hl[1]
+ma_hl <- bic_model_hl[2]
+
+hl_model <- VARMA(hl_train, ar_hl, ma_hl, include.mean = F, details = T)
+```
+
+```{r}
+#predict with hl model
+pred_hl <- VARMApred(hl_model, h=15)
+pred_hl_ts <- ts(pred_hl$pred, start=c(1911), end =1925)
+
+ts.plot(hl_train, pred_hl_ts, col = c(1,2,1,2), xlim=c(1880,1925), ylim = c(-3,3), 
+        main = "15-step ahead prediction with 95% confidence intervals")
+U = ts(pred_hl$pred+ 1.96*pred_hl$se.err, start = 1911, end = 1925) #95% confidence interval
+L = ts(pred_hl$pred - 1.96*pred_hl$se.err, start = 1911, end = 1925)
+lines(U[,1], lty="dotdash", col=2, lwd = 1)
+lines(U[,2], lty="dotdash", col=2, lwd = 1)
+lines(L[,1], lty="dashed", col=2, lwd = 1)
+lines(L[,2], lty="dashed", col=2, lwd = 1)
+lines(hl_test[,1], lty = "dashed", lwd = 2, col = 1)
+lines(hl_test[,2], lty = "dashed", lwd = 2, col = 2)
+legend("topleft", legend = c("predicted", "actual", "95% CI"), lty = c("solid", "dashed", "dotdash"), lwd = c(1, 3,.5))
+
+```
